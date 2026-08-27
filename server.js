@@ -1,17 +1,24 @@
 require("dotenv").config();
 
 const express = require("express");
+const crypto = require("crypto");
 const { google } = require("googleapis");
 
 const app = express();
 
-app.use(express.json({ limit: "1mb" }));
+app.set("trust proxy", 1);
 
-// =====================================================
+app.use(
+  express.json({
+    limit: "1mb",
+  })
+);
+
+// ============================================================
 // CONFIG
-// =====================================================
+// ============================================================
 
-const PORT = process.env.PORT || 10000;
+const PORT = Number(process.env.PORT || 10000);
 
 const BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN;
@@ -28,41 +35,58 @@ const GOOGLE_REDIRECT_URI =
 const GOOGLE_REFRESH_TOKEN =
   process.env.GOOGLE_REFRESH_TOKEN || "";
 
-// =====================================================
-// ENVIRONMENT CHECK
-// =====================================================
+const ADMIN_CHAT_ID =
+  process.env.ADMIN_CHAT_ID || "";
 
-if (!BOT_TOKEN) {
-  console.error(
-    "❌ TELEGRAM_BOT_TOKEN is missing"
-  );
-  process.exit(1);
+const WEBHOOK_SECRET =
+  process.env.TELEGRAM_WEBHOOK_SECRET || "";
+
+const APP_NAME =
+  process.env.APP_NAME ||
+  "Telegram Gmail Bot";
+
+// Gmail send scope
+const GMAIL_SEND_SCOPE =
+  "https://www.googleapis.com/auth/gmail.send";
+
+// ============================================================
+// STARTUP VALIDATION
+// ============================================================
+
+const required = [
+  ["TELEGRAM_BOT_TOKEN", BOT_TOKEN],
+  ["GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID],
+  ["GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET],
+  ["GOOGLE_REDIRECT_URI", GOOGLE_REDIRECT_URI],
+];
+
+for (const [name, value] of required) {
+  if (!value) {
+    console.error(`❌ Missing environment variable: ${name}`);
+    process.exit(1);
+  }
 }
 
-if (!GOOGLE_CLIENT_ID) {
-  console.error(
-    "❌ GOOGLE_CLIENT_ID is missing"
-  );
-  process.exit(1);
-}
+console.log("==========================================");
+console.log(`🚀 ${APP_NAME}`);
+console.log("==========================================");
+console.log(`🌐 Port: ${PORT}`);
+console.log(`🔐 OAuth: /auth/google`);
+console.log(
+  `📧 Gmail token: ${
+    GOOGLE_REFRESH_TOKEN ? "CONFIGURED" : "NOT CONFIGURED"
+  }`
+);
+console.log(
+  `👤 Admin: ${
+    ADMIN_CHAT_ID ? "CONFIGURED" : "NOT CONFIGURED"
+  }`
+);
+console.log("==========================================");
 
-if (!GOOGLE_CLIENT_SECRET) {
-  console.error(
-    "❌ GOOGLE_CLIENT_SECRET is missing"
-  );
-  process.exit(1);
-}
-
-if (!GOOGLE_REDIRECT_URI) {
-  console.error(
-    "❌ GOOGLE_REDIRECT_URI is missing"
-  );
-  process.exit(1);
-}
-
-// =====================================================
-// GOOGLE OAUTH CLIENT
-// =====================================================
+// ============================================================
+// GOOGLE OAUTH
+// ============================================================
 
 const oauth2Client =
   new google.auth.OAuth2(
@@ -71,405 +95,579 @@ const oauth2Client =
     GOOGLE_REDIRECT_URI
   );
 
-// Existing refresh token
 if (GOOGLE_REFRESH_TOKEN) {
   oauth2Client.setCredentials({
-    refresh_token:
-      GOOGLE_REFRESH_TOKEN
+    refresh_token: GOOGLE_REFRESH_TOKEN,
   });
 }
 
-// =====================================================
-// GMAIL API
-// =====================================================
+// ============================================================
+// GMAIL
+// ============================================================
 
 const gmail = google.gmail({
   version: "v1",
-  auth: oauth2Client
+  auth: oauth2Client,
 });
 
-// =====================================================
-// TELEGRAM API
-// =====================================================
+// ============================================================
+// TELEGRAM
+// ============================================================
 
 const TELEGRAM_API =
   `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-async function telegram(
-  method,
-  data = {}
-) {
+async function telegram(method, body = {}) {
   const response = await fetch(
     `${TELEGRAM_API}/${method}`,
     {
       method: "POST",
       headers: {
-        "Content-Type":
-          "application/json"
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(body),
     }
   );
 
-  return response.json();
+  const data = await response.json();
+
+  if (!data.ok) {
+    const error = new Error(
+      data.description ||
+        "Telegram API request failed"
+    );
+
+    error.telegram = data;
+
+    throw error;
+  }
+
+  return data;
 }
 
-// =====================================================
-// SEND TELEGRAM MESSAGE
-// =====================================================
-
-async function sendTelegramMessage(
-  chatId,
-  text
-) {
-  return telegram(
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text
-    }
-  );
+async function sendTelegram(chatId, text) {
+  return telegram("sendMessage", {
+    chat_id: chatId,
+    text,
+  });
 }
 
-// =====================================================
+// ============================================================
+// AUTHORIZATION
+// ============================================================
+
+function isAuthorized(chatId) {
+  if (!ADMIN_CHAT_ID) {
+    return true;
+  }
+
+  return String(chatId) ===
+    String(ADMIN_CHAT_ID);
+}
+
+// ============================================================
 // EMAIL VALIDATION
-// =====================================================
+// ============================================================
 
 function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    .test(email);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+    String(email)
+  );
 }
 
-// =====================================================
-// BASE64 URL ENCODE
-// =====================================================
+// ============================================================
+// HTML ESCAPE
+// ============================================================
 
-function base64UrlEncode(text) {
-  return Buffer
-    .from(text, "utf8")
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// ============================================================
+// BASE64URL
+// ============================================================
+
+function base64UrlEncode(value) {
+  return Buffer.from(
+    value,
+    "utf8"
+  )
     .toString("base64")
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
 }
 
-// =====================================================
-// CREATE RAW GMAIL EMAIL
-// =====================================================
+// ============================================================
+// MIME EMAIL
+// ============================================================
 
 function createRawEmail({
   from,
   to,
   subject,
-  text
+  text,
 }) {
-
-  const safeSubject =
-    String(subject)
-      .replace(/\r/g, "")
-      .replace(/\n/g, "");
-
-  const safeTo =
-    String(to)
-      .replace(/\r/g, "")
-      .replace(/\n/g, "");
-
-  const safeFrom =
-    String(from)
+  const clean = (value) =>
+    String(value)
       .replace(/\r/g, "")
       .replace(/\n/g, "");
 
   const message = [
-    `From: ${safeFrom}`,
-    `To: ${safeTo}`,
-    `Subject: ${safeSubject}`,
+    `From: ${clean(from)}`,
+    `To: ${clean(to)}`,
+    `Subject: ${clean(subject)}`,
     "MIME-Version: 1.0",
     "Content-Type: text/plain; charset=UTF-8",
     "Content-Transfer-Encoding: 8bit",
     "",
-    text
+    String(text),
   ].join("\r\n");
 
-  return base64UrlEncode(
-    message
-  );
+  return base64UrlEncode(message);
 }
 
-// =====================================================
-// SEND EMAIL THROUGH GMAIL
-// =====================================================
+// ============================================================
+// GET GMAIL PROFILE
+// ============================================================
+
+async function getGmailProfile() {
+  try {
+    const response =
+      await gmail.users.getProfile({
+        userId: "me",
+      });
+
+    return response.data;
+  } catch (error) {
+    throw createGmailError(
+      "Gmail profile request failed",
+      error
+    );
+  }
+}
+
+// ============================================================
+// GMAIL ERROR NORMALIZATION
+// ============================================================
+
+function createGmailError(prefix, error) {
+  const normalized =
+    new Error(
+      `${prefix}: ${
+        error?.message ||
+        "Unknown Gmail error"
+      }`
+    );
+
+  normalized.code =
+    error?.code;
+
+  normalized.responseData =
+    error?.response?.data;
+
+  normalized.original =
+    error;
+
+  return normalized;
+}
+
+// ============================================================
+// SEND GMAIL
+// ============================================================
 
 async function sendGmail({
   to,
   subject,
-  text
+  text,
 }) {
+  if (!GOOGLE_REFRESH_TOKEN) {
+    const error =
+      new Error(
+        "GOOGLE_REFRESH_TOKEN is not configured"
+      );
 
-  // Get Gmail account
+    error.code =
+      "NO_REFRESH_TOKEN";
+
+    throw error;
+  }
+
+  if (!isValidEmail(to)) {
+    const error =
+      new Error(
+        "Invalid recipient email"
+      );
+
+    error.code =
+      "INVALID_EMAIL";
+
+    throw error;
+  }
+
+  // Check Gmail account
   const profile =
-    await gmail.users.getProfile({
-      userId: "me"
-    });
+    await getGmailProfile();
 
   const sender =
-    profile.data.emailAddress;
+    profile.emailAddress;
 
   const raw =
     createRawEmail({
       from: sender,
       to,
-      subject,
-      text
+      subject:
+        subject ||
+        "Message from Telegram",
+      text,
     });
 
-  const result =
-    await gmail.users.messages.send({
-      userId: "me",
-      requestBody: {
-        raw
-      }
-    });
+  try {
+    const response =
+      await gmail.users.messages.send({
+        userId: "me",
 
-  return {
-    id: result.data.id,
-    threadId:
-      result.data.threadId,
-    sender
-  };
+        requestBody: {
+          raw,
+        },
+      });
+
+    return {
+      id:
+        response.data.id,
+
+      threadId:
+        response.data.threadId,
+
+      sender,
+      to,
+    };
+  } catch (error) {
+    throw createGmailError(
+      "Gmail send request failed",
+      error
+    );
+  }
 }
 
-// =====================================================
+// ============================================================
+// GMAIL DIAGNOSTICS
+// ============================================================
+
+function formatGmailError(error) {
+  const code =
+    error?.code || "unknown";
+
+  const message =
+    error?.message ||
+    "Unknown error";
+
+  const apiData =
+    error?.responseData;
+
+  let output =
+    `Code: ${code}\n` +
+    `Message: ${message}`;
+
+  if (apiData) {
+    try {
+      output +=
+        `\nAPI: ${JSON.stringify(
+          apiData
+        )}`;
+    } catch {}
+  }
+
+  return output;
+}
+
+// ============================================================
+// RATE LIMIT
+// ============================================================
+
+const rateMap = new Map();
+
+function rateLimit(chatId) {
+  const now = Date.now();
+
+  const previous =
+    rateMap.get(
+      String(chatId)
+    );
+
+  if (
+    previous &&
+    now - previous < 5000
+  ) {
+    return false;
+  }
+
+  rateMap.set(
+    String(chatId),
+    now
+  );
+
+  return true;
+}
+
+// ============================================================
 // HOME
-// =====================================================
+// ============================================================
 
 app.get("/", (req, res) => {
-
   res.json({
     status: "ok",
-    service:
-      "Telegram Gmail Email Bot",
-    email_provider:
-      "Gmail API",
+    service: APP_NAME,
+    provider: "Gmail API",
     oauth:
       GOOGLE_REFRESH_TOKEN
         ? "connected"
-        : "not_connected"
+        : "not_connected",
+    telegram:
+      BOT_TOKEN
+        ? "configured"
+        : "not_configured",
   });
 });
 
-// =====================================================
+// ============================================================
 // HEALTH
-// =====================================================
+// ============================================================
 
-app.get(
-  "/health",
-  (req, res) => {
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptime:
+      Math.round(
+        process.uptime()
+      ),
+  });
+});
 
-    res.json({
-      status: "ok",
-      service:
-        "telegram-gmail-email-bot"
-    });
+// ============================================================
+// STATUS
+// ============================================================
+
+app.get("/status", async (req, res) => {
+  const result = {
+    server: "ok",
+    gmail: false,
+    telegram: false,
+  };
+
+  // Gmail
+  if (GOOGLE_REFRESH_TOKEN) {
+    try {
+      await getGmailProfile();
+
+      result.gmail = true;
+    } catch (error) {
+      result.gmail = false;
+
+      result.gmail_error =
+        error.message;
+    }
   }
-);
 
-// =====================================================
-// GOOGLE AUTH START
-// =====================================================
+  // Telegram
+  try {
+    const bot =
+      await telegram(
+        "getMe"
+      );
+
+    result.telegram =
+      !!bot.ok;
+
+    if (bot.result) {
+      result.bot_username =
+        bot.result.username;
+    }
+  } catch (error) {
+    result.telegram = false;
+
+    result.telegram_error =
+      error.message;
+  }
+
+  res.json(result);
+});
+
+// ============================================================
+// GOOGLE AUTH
+// ============================================================
 
 app.get(
   "/auth/google",
   (req, res) => {
+    try {
+      const state =
+        crypto.randomBytes(32)
+          .toString("hex");
 
-    const authUrl =
-      oauth2Client.generateAuthUrl({
-        access_type: "offline",
+      // For a production multi-user
+      // application, persist and validate state.
+      // This simple deployment uses
+      // a one-time authorization flow.
 
-        // Forces Google to return
-        // a refresh token during
-        // the initial authorization.
-        prompt: "consent",
+      const url =
+        oauth2Client.generateAuthUrl({
+          access_type: "offline",
 
-        scope: [
-          "https://www.googleapis.com/auth/gmail.send"
-        ]
-      });
+          prompt: "consent",
 
-    res.redirect(authUrl);
+          scope: [
+            GMAIL_SEND_SCOPE,
+          ],
+
+          state,
+        });
+
+      res.redirect(url);
+    } catch (error) {
+      console.error(
+        "OAuth start error:",
+        error.message
+      );
+
+      res
+        .status(500)
+        .send(
+          "Failed to start Google OAuth."
+        );
+    }
   }
 );
 
-// =====================================================
-// GOOGLE OAUTH CALLBACK
-// =====================================================
+// ============================================================
+// OAUTH CALLBACK
+// ============================================================
 
 app.get(
   "/oauth2/callback",
   async (req, res) => {
-
     try {
-
       const code =
         req.query.code;
 
       if (!code) {
-
         return res
           .status(400)
           .send(`
-            <h2>❌ Authorization failed</h2>
+            <h2>❌ OAuth Failed</h2>
             <p>Missing authorization code.</p>
           `);
       }
 
       const {
-        tokens
+        tokens,
       } =
         await oauth2Client.getToken(
           code
         );
 
-      // IMPORTANT:
-      // Don't print token in Render logs.
-      // Show it only in this browser page.
-
       if (!tokens.refresh_token) {
-
         return res
           .status(400)
           .send(`
-            <h2>❌ No refresh token received</h2>
+            <h2>⚠️ No Refresh Token</h2>
 
             <p>
               Google did not return a refresh token.
             </p>
 
             <p>
-              Revoke this app from your Google
-              account and authorize again.
+              Revoke the existing application
+              permission and authorize again.
             </p>
           `);
       }
 
-      const token =
-        tokens.refresh_token;
+      /*
+       * SECURITY:
+       *
+       * Do NOT print the refresh token.
+       * Do NOT put it in Render logs.
+       * Do NOT put it on GitHub.
+       *
+       * The recommended approach is to securely
+       * store it as GOOGLE_REFRESH_TOKEN.
+       */
 
       res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
 
-  <meta
-    name="viewport"
-    content="width=device-width,initial-scale=1"
-  >
+<title>Gmail Connected</title>
 
-  <title>Gmail Connected</title>
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background: #f5f5f5;
+  padding: 30px;
+}
 
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 25px;
-      background: #f5f5f5;
-    }
+.box {
+  max-width: 600px;
+  margin: auto;
+  background: white;
+  padding: 30px;
+  border-radius: 14px;
+}
 
-    .box {
-      max-width: 700px;
-      margin: auto;
-      background: white;
-      padding: 25px;
-      border-radius: 12px;
-    }
+.success {
+  color: green;
+}
 
-    textarea {
-      width: 100%;
-      height: 140px;
-      box-sizing: border-box;
-      padding: 12px;
-      font-family: monospace;
-    }
+.warning {
+  color: #b00020;
+}
+</style>
 
-    button {
-      margin-top: 10px;
-      padding: 12px 20px;
-      border: 0;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-
-    .warning {
-      color: #b00020;
-      font-weight: bold;
-    }
-  </style>
 </head>
 
 <body>
 
 <div class="box">
 
-  <h2>✅ Gmail Connected</h2>
+<h2 class="success">
+✅ Gmail OAuth Successful
+</h2>
 
-  <p>
-    Google OAuth authorization was successful.
-  </p>
+<p>
+Google authorization completed successfully.
+</p>
 
-  <p>
-    Copy the refresh token below.
-  </p>
+<p>
+The Gmail connection was authorized.
+</p>
 
-  <textarea
-    id="token"
-    readonly
-  >${token}</textarea>
+<p>
+Now make sure your Render environment contains:
+</p>
 
-  <br>
+<pre>GOOGLE_REFRESH_TOKEN</pre>
 
-  <button
-    onclick="copyToken()"
-  >
-    📋 Copy Token
-  </button>
-
-  <p>
-    Render → Environment
-  </p>
-
-  <p>
-    Variable name:
-  </p>
-
-  <pre>GOOGLE_REFRESH_TOKEN</pre>
-
-  <p class="warning">
-    ⚠️ Do NOT share this token.
-    Do NOT put it on GitHub.
-  </p>
+<p class="warning">
+⚠️ For security, this page does not display
+the refresh token.
+</p>
 
 </div>
-
-<script>
-function copyToken() {
-  const token =
-    document.getElementById("token");
-
-  token.select();
-
-  navigator.clipboard.writeText(
-    token.value
-  );
-
-  alert("Token copied!");
-}
-</script>
 
 </body>
 </html>
       `);
-
     } catch (error) {
-
       console.error(
         "OAuth callback error:",
         error.message
@@ -478,7 +676,7 @@ function copyToken() {
       res
         .status(500)
         .send(`
-          <h2>❌ Google OAuth failed</h2>
+          <h2>❌ Google OAuth Failed</h2>
           <p>
             ${escapeHtml(
               error.message
@@ -489,83 +687,47 @@ function copyToken() {
   }
 );
 
-// =====================================================
-// HTML ESCAPE
-// =====================================================
-
-function escapeHtml(value) {
-
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-// =====================================================
-// MANUAL EMAIL API
-// =====================================================
+// ============================================================
+// SEND EMAIL API
+// ============================================================
 
 app.post(
   "/send-email",
   async (req, res) => {
-
     try {
-
-      if (!GOOGLE_REFRESH_TOKEN) {
-
-        return res
-          .status(503)
-          .json({
-            success: false,
-            error:
-              "Gmail is not connected"
-          });
-      }
-
       const {
         to,
         subject,
-        text
+        text,
       } = req.body;
 
-      if (
-        !to ||
-        !isValidEmail(to)
-      ) {
-
+      if (!to) {
         return res
           .status(400)
           .json({
             success: false,
             error:
-              "Invalid email address"
+              "Recipient is required",
           });
       }
 
-      if (
-        !text ||
-        typeof text !== "string"
-      ) {
-
+      if (!isValidEmail(to)) {
         return res
           .status(400)
           .json({
             success: false,
             error:
-              "Message is required"
+              "Invalid recipient email",
           });
       }
 
-      if (text.length > 10000) {
-
+      if (!text) {
         return res
           .status(400)
           .json({
             success: false,
             error:
-              "Message is too long"
+              "Message is required",
           });
       }
 
@@ -575,23 +737,35 @@ app.post(
           subject:
             subject ||
             "Message from Telegram",
-          text
+          text,
         });
 
       res.json({
         success: true,
         message:
           "Email sent successfully",
-        id: result.id,
-        from: result.sender,
-        to
+        message_id:
+          result.id,
+        thread_id:
+          result.threadId,
+        from:
+          result.sender,
+        to:
+          result.to,
       });
-
     } catch (error) {
+      console.error(
+        "========== GMAIL API ERROR =========="
+      );
 
       console.error(
-        "Gmail API error:",
-        error.message
+        formatGmailError(
+          error
+        )
+      );
+
+      console.error(
+        "======================================"
       );
 
       res
@@ -599,119 +773,192 @@ app.post(
         .json({
           success: false,
           error:
-            "Failed to send email"
+            error.message,
+          code:
+            error.code ||
+            "UNKNOWN",
         });
     }
   }
 );
 
-// =====================================================
+// ============================================================
 // TELEGRAM WEBHOOK
-// =====================================================
+// ============================================================
 
 app.post(
   "/telegram/webhook",
   async (req, res) => {
 
-    // Telegram requires a quick response.
+    // Telegram gets immediate response.
     res.sendStatus(200);
 
     try {
+      // Optional secret header validation
+      if (WEBHOOK_SECRET) {
+        const received =
+          req.headers[
+            "x-telegram-bot-api-secret-token"
+          ];
+
+        if (
+          received !==
+          WEBHOOK_SECRET
+        ) {
+          console.warn(
+            "⚠️ Invalid Telegram webhook secret"
+          );
+
+          return;
+        }
+      }
 
       const update =
         req.body;
 
-      if (
-        !update ||
-        !update.message
-      ) {
+      const message =
+        update?.message;
+
+      if (!message) {
         return;
       }
-
-      const message =
-        update.message;
 
       const chatId =
         message.chat.id;
 
       const text =
-        message.text || "";
+        String(
+          message.text || ""
+        ).trim();
 
-      // =================================================
-      // /start
-      // =================================================
-
-      if (text === "/start") {
-
-        await sendTelegramMessage(
+      // Authorization
+      if (
+        !isAuthorized(
+          chatId
+        )
+      ) {
+        await sendTelegram(
           chatId,
-
-          "🤖 Telegram Gmail Bot\n\n" +
-
-          "📧 Send an email:\n\n" +
-
-          "/send email@example.com Hello\n\n" +
-
-          "Commands:\n" +
-          "/start\n" +
-          "/help"
+          "❌ You are not authorized to use this bot."
         );
 
         return;
       }
 
-      // =================================================
-      // /help
-      // =================================================
+      // Rate limit
+      if (
+        !rateLimit(
+          chatId
+        )
+      ) {
+        await sendTelegram(
+          chatId,
+          "⏳ Please wait a few seconds before sending another request."
+        );
 
-      if (text === "/help") {
+        return;
+      }
 
-        await sendTelegramMessage(
+      // ========================================================
+      // START
+      // ========================================================
+
+      if (
+        text === "/start"
+      ) {
+        await sendTelegram(
           chatId,
 
-          "📖 Telegram Gmail Bot\n\n" +
+          "🤖 Gmail Telegram Bot\n\n" +
 
-          "📧 Send email:\n" +
+          "Commands:\n\n" +
+
+          "/start\n" +
+          "/help\n" +
+          "/status\n\n" +
+
+          "Send email:\n" +
+
+          "/send email@example.com Hello from Telegram"
+        );
+
+        return;
+      }
+
+      // ========================================================
+      // HELP
+      // ========================================================
+
+      if (
+        text === "/help"
+      ) {
+        await sendTelegram(
+          chatId,
+
+          "📖 Help\n\n" +
+
+          "Send an email:\n\n" +
+
           "/send email@example.com Your message\n\n" +
 
           "Example:\n" +
-          "/send test@gmail.com Hello from Telegram"
+
+          "/send test@gmail.com Hello!"
         );
 
         return;
       }
 
-      // =================================================
-      // /send
-      // =================================================
+      // ========================================================
+      // STATUS
+      // ========================================================
+
+      if (
+        text === "/status"
+      ) {
+        try {
+          const profile =
+            await getGmailProfile();
+
+          await sendTelegram(
+            chatId,
+
+            "✅ Gmail connected\n\n" +
+
+            `📧 Account: ${profile.emailAddress}`
+          );
+        } catch (error) {
+          await sendTelegram(
+            chatId,
+
+            "❌ Gmail connection failed.\n\n" +
+            error.message
+          );
+        }
+
+        return;
+      }
+
+      // ========================================================
+      // SEND
+      // ========================================================
 
       if (
         text === "/send" ||
         text.startsWith("/send ")
       ) {
+        const args =
+          text
+            .substring(
+              5
+            )
+            .trim();
 
-        if (!GOOGLE_REFRESH_TOKEN) {
+        const space =
+          args.indexOf(" ");
 
-          await sendTelegramMessage(
-            chatId,
-
-            "❌ Gmail is not connected.\n\n" +
-            "Connect Gmail using:\n" +
-            "/auth"
-          );
-
-          return;
-        }
-
-        const command =
-          text.trim();
-
-        const firstSpace =
-          command.indexOf(" ");
-
-        if (firstSpace === -1) {
-
-          await sendTelegramMessage(
+        if (space === -1) {
+          await sendTelegram(
             chatId,
 
             "❌ Invalid format.\n\n" +
@@ -724,64 +971,37 @@ app.post(
           return;
         }
 
-        const remaining =
-          command
-            .substring(
-              firstSpace + 1
-            )
-            .trim();
-
-        const secondSpace =
-          remaining.indexOf(" ");
-
-        if (secondSpace === -1) {
-
-          await sendTelegramMessage(
-            chatId,
-
-            "❌ Message is missing.\n\n" +
-
-            "Use:\n" +
-
-            "/send email@example.com Hello"
-          );
-
-          return;
-        }
-
         const email =
-          remaining
+          args
             .substring(
               0,
-              secondSpace
+              space
             )
             .trim();
 
-        const emailMessage =
-          remaining
+        const body =
+          args
             .substring(
-              secondSpace + 1
+              space + 1
             )
             .trim();
 
         if (
-          !isValidEmail(email)
+          !isValidEmail(
+            email
+          )
         ) {
-
-          await sendTelegramMessage(
+          await sendTelegram(
             chatId,
-
             "❌ Invalid email address."
           );
 
           return;
         }
 
-        if (!emailMessage) {
-
-          await sendTelegramMessage(
+        if (!body) {
+          await sendTelegram(
             chatId,
-
             "❌ Message cannot be empty."
           );
 
@@ -789,26 +1009,22 @@ app.post(
         }
 
         if (
-          emailMessage.length >
-          10000
+          body.length > 10000
         ) {
-
-          await sendTelegramMessage(
+          await sendTelegram(
             chatId,
-
             "❌ Message is too long."
           );
 
           return;
         }
 
-        await sendTelegramMessage(
+        await sendTelegram(
           chatId,
-          "⏳ Sending email through Gmail..."
+          "⏳ Sending email..."
         );
 
         try {
-
           const result =
             await sendGmail({
               to: email,
@@ -817,41 +1033,58 @@ app.post(
                 "Message from Telegram",
 
               text:
-                emailMessage
+                body,
             });
 
-          await sendTelegramMessage(
+          await sendTelegram(
             chatId,
 
             "✅ Email sent successfully!\n\n" +
 
-            `📧 To: ${email}\n` +
+            `📧 To: ${result.to}\n` +
 
-            `📤 From: ${result.sender}`
+            `📤 From: ${result.sender}\n\n` +
+
+            `🆔 ${result.id}`
           );
-
         } catch (error) {
 
           console.error(
-            "Send Gmail error:",
-            error.message
+            "========== TELEGRAM → GMAIL ERROR =========="
           );
 
-          await sendTelegramMessage(
+          console.error(
+            formatGmailError(
+              error
+            )
+          );
+
+          console.error(
+            "============================================="
+          );
+
+          await sendTelegram(
             chatId,
 
-            "❌ Gmail failed to send the email."
+            "❌ Gmail failed to send the email.\n\n" +
+
+            `Code: ${
+              error.code ||
+              "UNKNOWN"
+            }\n\n` +
+
+            `${error.message}`
           );
         }
 
         return;
       }
 
-      // =================================================
-      // UNKNOWN COMMAND
-      // =================================================
+      // ========================================================
+      // UNKNOWN
+      // ========================================================
 
-      await sendTelegramMessage(
+      await sendTelegram(
         chatId,
 
         "❓ Unknown command.\n\n" +
@@ -859,7 +1092,6 @@ app.post(
       );
 
     } catch (error) {
-
       console.error(
         "Telegram webhook error:",
         error.message
@@ -868,52 +1100,148 @@ app.post(
   }
 );
 
-// =====================================================
+// ============================================================
+// TELEGRAM WEBHOOK SETUP
+// ============================================================
+
+app.post(
+  "/telegram/setup-webhook",
+  async (req, res) => {
+    try {
+
+      const webhookUrl =
+        `${GOOGLE_REDIRECT_URI
+          .replace(
+            "/oauth2/callback",
+            ""
+          )}` +
+        `/telegram/webhook`;
+
+      const body = {
+        url:
+          webhookUrl,
+      };
+
+      if (WEBHOOK_SECRET) {
+        body.secret_token =
+          WEBHOOK_SECRET;
+      }
+
+      const result =
+        await telegram(
+          "setWebhook",
+          body
+        );
+
+      res.json({
+        success: true,
+        webhook:
+          webhookUrl,
+        telegram:
+          result,
+      });
+
+    } catch (error) {
+      res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            error.message,
+        });
+    }
+  }
+);
+
+// ============================================================
 // 404
-// =====================================================
+// ============================================================
 
 app.use(
   (req, res) => {
-
     res
       .status(404)
       .json({
         success: false,
         error:
-          "Endpoint not found"
+          "Endpoint not found",
       });
   }
 );
 
-// =====================================================
-// START SERVER
-// =====================================================
+// ============================================================
+// ERROR HANDLER
+// ============================================================
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-
-    console.log(
-      `🚀 Gmail Telegram Bot running on port ${PORT}`
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "Unhandled server error:",
+      error.message
     );
 
-    console.log(
-      `🌐 Port: ${PORT}`
-    );
-
-    console.log(
-      `🔐 OAuth: /auth/google`
-    );
-
-    console.log(
-      `📧 Gmail API ready`
-    );
-
-    console.log(
-      GOOGLE_REFRESH_TOKEN
-        ? "✅ Gmail OAuth token configured"
-        : "⚠️ Gmail OAuth token not configured"
-    );
+    res
+      .status(500)
+      .json({
+        success: false,
+        error:
+          "Internal server error",
+      });
   }
+);
+
+// ============================================================
+// START
+// ============================================================
+
+const server =
+  app.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+
+      console.log(
+        `🚀 Server running on port ${PORT}`
+      );
+
+      console.log(
+        `📧 Gmail API: ${
+          GOOGLE_REFRESH_TOKEN
+            ? "READY"
+            : "NOT CONNECTED"
+        }`
+      );
+
+      console.log(
+        `🤖 Telegram: READY`
+      );
+    }
+  );
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// ============================================================
+
+function shutdown(signal) {
+  console.log(
+    `${signal} received. Shutting down...`
+  );
+
+  server.close(() => {
+    console.log(
+      "Server closed."
+    );
+
+    process.exit(0);
+  });
+}
+
+process.on(
+  "SIGTERM",
+  () => shutdown("SIGTERM")
+);
+
+process.on(
+  "SIGINT",
+  () => shutdown("SIGINT")
 );
