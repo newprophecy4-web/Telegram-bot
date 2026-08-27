@@ -594,7 +594,7 @@ app.get(
 );
 
 // ============================================================
-// OAUTH CALLBACK
+// OAUTH CALLBACK — MODIFIED TO SHOW TOKEN + COPY BUTTON
 // ============================================================
 
 app.get(
@@ -634,18 +634,7 @@ app.get(
 
       }
 
-      /*
-       * IMPORTANT:
-       *
-       * Do NOT print the token.
-       *
-       * Render environment variables cannot be
-       * modified from this server automatically.
-       *
-       * The token must be copied securely into
-       * Render Environment as GOOGLE_REFRESH_TOKEN.
-       */
-
+      // Log that we got a token (but don't log the token itself)
       console.log(
         "✅ Google OAuth completed."
       );
@@ -654,101 +643,118 @@ app.get(
         "🔐 New refresh token received: YES"
       );
 
+      // Extract the refresh token for display
+      const newRefreshToken = tokens.refresh_token;
+
+      // Build HTML response that shows the token and includes a copy button
       res.send(`
 <!DOCTYPE html>
-
 <html>
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1">
-
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Gmail Connected</title>
-
 <style>
-
-body {
-  margin: 0;
-  padding: 30px;
-  background: #020617;
-  color: white;
-  font-family: system-ui;
-}
-
-.box {
-  max-width: 650px;
-  margin: 50px auto;
-  padding: 30px;
-  border-radius: 22px;
-  background: #111827;
-}
-
-.success {
-  color: #86efac;
-}
-
-.warning {
-  color: #fbbf24;
-}
-
-code {
-  display: block;
-  margin-top: 15px;
-  padding: 15px;
-  background: #020617;
-  border-radius: 10px;
-}
-
+  body {
+    margin: 0;
+    padding: 30px;
+    background: #020617;
+    color: white;
+    font-family: system-ui, sans-serif;
+  }
+  .box {
+    max-width: 650px;
+    margin: 50px auto;
+    padding: 30px;
+    border-radius: 22px;
+    background: #111827;
+  }
+  .success { color: #86efac; }
+  .warning { color: #fbbf24; }
+  .token-box {
+    background: #020617;
+    padding: 18px;
+    border-radius: 12px;
+    word-break: break-all;
+    font-family: monospace;
+    font-size: 14px;
+    margin: 15px 0;
+    border: 1px solid #334155;
+    position: relative;
+  }
+  .copy-btn {
+    background: #2563eb;
+    border: none;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .copy-btn:hover {
+    opacity: 0.9;
+  }
+  .copy-btn:active {
+    transform: scale(0.97);
+  }
+  .note {
+    color: #94a3b8;
+    font-size: 14px;
+    margin-top: 10px;
+  }
+  .danger {
+    color: #f87171;
+  }
 </style>
-
 </head>
-
 <body>
-
 <div class="box">
+  <h1 class="success">✅ Gmail OAuth Successful</h1>
+  <p>Google authorization completed successfully.</p>
+  <p>A new refresh token was received.</p>
 
-<h1 class="success">
-✅ Gmail OAuth Successful
-</h1>
+  <h3>🔑 Your Refresh Token</h3>
+  <div class="token-box" id="tokenDisplay">${newRefreshToken}</div>
+  <button class="copy-btn" onclick="copyToken()">📋 Copy Token</button>
 
-<p>
-Google authorization completed successfully.
-</p>
-
-<p>
-A new refresh token was received.
-</p>
-
-<h3>
-Next step
-</h3>
-
-<p>
-Set the new token in Render:
-</p>
-
-<code>
-GOOGLE_REFRESH_TOKEN
-</code>
-
-<p class="warning">
-⚠️ The refresh token is intentionally NOT displayed
-in the browser or Render logs.
-</p>
-
-<p>
-After updating Render Environment,
-redeploy the service.
-</p>
-
+  <h3>Next Step</h3>
+  <p>Set this token in your Render environment variable:</p>
+  <code style="display:block;background:#020617;padding:12px;border-radius:8px;margin:10px 0;">
+    GOOGLE_REFRESH_TOKEN
+  </code>
+  <p class="note">
+    After updating the environment variable, redeploy your service.
+  </p>
+  <p class="danger">
+    ⚠️ Keep this token secret. Anyone with it can send email from your account.
+  </p>
+  <p><a href="/" style="color:#60a5fa;">← Back to Dashboard</a></p>
 </div>
 
+<script>
+  function copyToken() {
+    const token = document.getElementById('tokenDisplay').textContent;
+    navigator.clipboard.writeText(token).then(() => {
+      const btn = document.querySelector('.copy-btn');
+      const original = btn.textContent;
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    }).catch(() => {
+      // fallback
+      const range = document.createRange();
+      range.selectNode(document.getElementById('tokenDisplay'));
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(range);
+      document.execCommand('copy');
+      const btn = document.querySelector('.copy-btn');
+      const original = btn.textContent;
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    });
+  }
+</script>
+</div>
 </body>
-
 </html>
       `);
 
