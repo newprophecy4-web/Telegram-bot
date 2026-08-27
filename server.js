@@ -4,17 +4,29 @@ const express = require("express");
 const { Resend } = require("resend");
 
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL;
-const ADMIN_TELEGRAM_USER_ID = process.env.ADMIN_TELEGRAM_USER_ID;
 
-if (!BOT_TOKEN || !RESEND_API_KEY || !FROM_EMAIL) {
-  console.error("Missing required environment variables.");
+// FROM_EMAIL optional
+const FROM_EMAIL =
+  process.env.FROM_EMAIL || "onboarding@resend.dev";
+
+// ===============================
+// Environment Check
+// ===============================
+
+if (!BOT_TOKEN) {
+  console.error("❌ TELEGRAM_BOT_TOKEN is missing");
+  process.exit(1);
+}
+
+if (!RESEND_API_KEY) {
+  console.error("❌ RESEND_API_KEY is missing");
   process.exit(1);
 }
 
@@ -23,21 +35,28 @@ const resend = new Resend(RESEND_API_KEY);
 const TELEGRAM_API =
   `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-async function telegram(method, body = {}) {
-  const response = await fetch(`${TELEGRAM_API}/${method}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+// ===============================
+// Telegram API Helper
+// ===============================
 
-  return response.json();
+async function telegram(method, data = {}) {
+  const response = await fetch(
+    `${TELEGRAM_API}/${method}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(data)
+    }
+  );
+
+  return await response.json();
 }
 
-function validEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
+// ===============================
+// Send Telegram Message
+// ===============================
 
 async function sendTelegramMessage(chatId, text) {
   return telegram("sendMessage", {
@@ -46,16 +65,35 @@ async function sendTelegramMessage(chatId, text) {
   });
 }
 
-async function sendEmail(to, text) {
+// ===============================
+// Email Validation
+// ===============================
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// ===============================
+// Send Email
+// ===============================
+
+async function sendEmail({
+  to,
+  subject,
+  text
+}) {
   return resend.emails.send({
     from: FROM_EMAIL,
     to: [to],
-    subject: "Message from Telegram",
+    subject,
     text
   });
 }
 
-/* Health */
+// ===============================
+// Home
+// ===============================
+
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
@@ -64,25 +102,40 @@ app.get("/", (req, res) => {
   });
 });
 
+// ===============================
+// Health
+// ===============================
+
 app.get("/health", (req, res) => {
   res.json({
-    status: "ok"
+    status: "ok",
+    service: "telegram-email-bot"
   });
 });
 
-/* Manual API */
+// ===============================
+// Email API
+// ===============================
+
 app.post("/send-email", async (req, res) => {
   try {
-    const { to, subject, text } = req.body;
+    const {
+      to,
+      subject,
+      text
+    } = req.body;
 
-    if (!to || !validEmail(to)) {
+    if (!to || !isValidEmail(to)) {
       return res.status(400).json({
         success: false,
         error: "Invalid email address"
       });
     }
 
-    if (!text || typeof text !== "string") {
+    if (
+      !text ||
+      typeof text !== "string"
+    ) {
       return res.status(400).json({
         success: false,
         error: "Message is required"
@@ -96,167 +149,302 @@ app.post("/send-email", async (req, res) => {
       });
     }
 
-    const result = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: [to],
-      subject: subject || "Message from Telegram",
+    const result = await sendEmail({
+      to,
+      subject:
+        subject || "Message from Telegram",
       text
     });
 
     if (result.error) {
+      console.error(
+        "Resend error:",
+        result.error.message || "Unknown error"
+      );
+
       return res.status(500).json({
         success: false,
         error: "Email sending failed"
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: "Email sent successfully",
       id: result.data?.id || null
     });
 
   } catch (error) {
-    console.error("Email error:", error.message);
+    console.error(
+      "Email API error:",
+      error.message
+    );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: "Internal server error"
     });
   }
 });
 
-/* Telegram Webhook */
-app.post("/telegram/webhook", async (req, res) => {
-  res.sendStatus(200);
+// ===============================
+// Telegram Webhook
+// ===============================
 
-  try {
-    const update = req.body;
+app.post(
+  "/telegram/webhook",
+  async (req, res) => {
 
-    if (!update.message) return;
+    // Respond immediately to Telegram
+    res.sendStatus(200);
 
-    const message = update.message;
-    const chatId = message.chat.id;
-    const userId = message.from?.id;
-    const text = message.text || "";
+    try {
 
-    /* Optional admin restriction */
-    if (
-      ADMIN_TELEGRAM_USER_ID &&
-      String(userId) !== String(ADMIN_TELEGRAM_USER_ID)
-    ) {
-      await sendTelegramMessage(
-        chatId,
-        "❌ You are not authorized to use this bot."
-      );
-      return;
-    }
+      const update = req.body;
 
-    /* /start */
-    if (text === "/start") {
-      await sendTelegramMessage(
-        chatId,
-        "🤖 Telegram Email Bot\n\n" +
-        "Send an email using:\n\n" +
-        "/send email@example.com Your message here"
-      );
-      return;
-    }
-
-    /* /help */
-    if (text === "/help") {
-      await sendTelegramMessage(
-        chatId,
-        "📖 Commands:\n\n" +
-        "/start - Start bot\n" +
-        "/help - Show help\n\n" +
-        "Send email:\n" +
-        "/send email@example.com Hello!"
-      );
-      return;
-    }
-
-    /* /send */
-    if (text.startsWith("/send")) {
-      const parts = text.split(" ");
-
-      if (parts.length < 3) {
-        await sendTelegramMessage(
-          chatId,
-          "❌ Wrong format.\n\n" +
-          "Use:\n" +
-          "/send email@example.com Your message"
-        );
+      if (!update?.message) {
         return;
       }
 
-      const email = parts[1];
-      const emailMessage = parts.slice(2).join(" ");
+      const message = update.message;
 
-      if (!validEmail(email)) {
+      const chatId =
+        message.chat.id;
+
+      const text =
+        message.text || "";
+
+      // ==========================
+      // /start
+      // ==========================
+
+      if (text === "/start") {
+
         await sendTelegramMessage(
           chatId,
-          "❌ Invalid email address."
+          "🤖 Telegram Email Bot\n\n" +
+          "📧 Send an email using:\n\n" +
+          "/send email@example.com Hello\n\n" +
+          "Commands:\n" +
+          "/start\n" +
+          "/help"
         );
+
         return;
       }
 
-      if (!emailMessage.trim()) {
+      // ==========================
+      // /help
+      // ==========================
+
+      if (text === "/help") {
+
         await sendTelegramMessage(
           chatId,
-          "❌ Message cannot be empty."
+          "📖 Help\n\n" +
+          "📧 Send Email:\n" +
+          "/send email@example.com Your message\n\n" +
+          "Example:\n" +
+          "/send test@example.com Hello from Telegram"
         );
+
         return;
       }
 
-      await sendTelegramMessage(
-        chatId,
-        "⏳ Sending email..."
-      );
+      // ==========================
+      // /send
+      // ==========================
 
-      try {
-        const result = await sendEmail(
-          email,
-          emailMessage
-        );
+      if (
+        text === "/send" ||
+        text.startsWith("/send ")
+      ) {
 
-        if (result.error) {
+        const command =
+          text.trim();
+
+        const firstSpace =
+          command.indexOf(" ");
+
+        if (firstSpace === -1) {
+
           await sendTelegramMessage(
             chatId,
-            "❌ Email sending failed."
+            "❌ Invalid format.\n\n" +
+            "Use:\n" +
+            "/send email@example.com Your message"
           );
+
           return;
         }
 
+        const remaining =
+          command
+            .substring(firstSpace + 1)
+            .trim();
+
+        const secondSpace =
+          remaining.indexOf(" ");
+
+        if (secondSpace === -1) {
+
+          await sendTelegramMessage(
+            chatId,
+            "❌ Message is missing.\n\n" +
+            "Use:\n" +
+            "/send email@example.com Hello"
+          );
+
+          return;
+        }
+
+        const email =
+          remaining
+            .substring(0, secondSpace)
+            .trim();
+
+        const emailMessage =
+          remaining
+            .substring(secondSpace + 1)
+            .trim();
+
+        // Validate email
+
+        if (!isValidEmail(email)) {
+
+          await sendTelegramMessage(
+            chatId,
+            "❌ Invalid email address."
+          );
+
+          return;
+        }
+
+        // Validate message
+
+        if (!emailMessage) {
+
+          await sendTelegramMessage(
+            chatId,
+            "❌ Message cannot be empty."
+          );
+
+          return;
+        }
+
+        // Message limit
+
+        if (emailMessage.length > 10000) {
+
+          await sendTelegramMessage(
+            chatId,
+            "❌ Message is too long."
+          );
+
+          return;
+        }
+
+        // Sending message
+
         await sendTelegramMessage(
           chatId,
-          `✅ Email sent successfully!\n\n` +
-          `📧 To: ${email}`
+          "⏳ Sending email..."
         );
 
-      } catch (error) {
-        console.error("Resend error:", error.message);
+        try {
 
-        await sendTelegramMessage(
-          chatId,
-          "❌ Failed to send email."
-        );
+          const result =
+            await sendEmail({
+              to: email,
+              subject:
+                "Message from Telegram",
+              text: emailMessage
+            });
+
+          if (result.error) {
+
+            console.error(
+              "Resend error:",
+              result.error.message ||
+              "Unknown error"
+            );
+
+            await sendTelegramMessage(
+              chatId,
+              "❌ Email sending failed."
+            );
+
+            return;
+          }
+
+          await sendTelegramMessage(
+            chatId,
+            "✅ Email sent successfully!\n\n" +
+            `📧 To: ${email}`
+          );
+
+        } catch (error) {
+
+          console.error(
+            "Email error:",
+            error.message
+          );
+
+          await sendTelegramMessage(
+            chatId,
+            "❌ Failed to send email."
+          );
+        }
+
+        return;
       }
 
-      return;
-    }
+      // ==========================
+      // Unknown command
+      // ==========================
 
-    await sendTelegramMessage(
-      chatId,
-      "Unknown command.\nUse /help"
+      await sendTelegramMessage(
+        chatId,
+        "❓ Unknown command.\n\n" +
+        "Use /help"
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Webhook error:",
+        error.message
+      );
+    }
+  }
+);
+
+// ===============================
+// 404
+// ===============================
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Endpoint not found"
+  });
+});
+
+// ===============================
+// Start Server
+// ===============================
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      `🚀 Telegram Email Bot running on port ${PORT}`
     );
 
-  } catch (error) {
-    console.error("Telegram webhook error:", error.message);
+    console.log(
+      `📧 From: ${FROM_EMAIL}`
+    );
   }
-});
-
-/* Start server */
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+);
